@@ -1,86 +1,117 @@
-from flask import Flask, request, jsonify
-from flask_cors import CORS
+"""
+main.py - 힙 정렬 vs 도수 정렬 시각화 대시보드 백엔드 API
+Stitch 프로젝트: projects/14863255674366848797 연동
+Google Cloud Run 배포 최적화 FastAPI 애플리케이션
+"""
 
-app = Flask(__name__)
-# CORS 설정: 구글 앱스 스크립트 도메인과의 Cross-Origin 요청을 허용합니다.
-CORS(app)
+import os
+import sys
+import time
+import random
+from typing import List, Optional, Dict, Any
+from fastapi import FastAPI, HTTPException, Request, status
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field, field_validator
 
-@app.route('/', methods=['GET'])
+from sorters import heap_sort_recorder, counting_sort_recorder, METADATA
+
+app = FastAPI(
+    title="Heap Sort vs Counting Sort Visualizer API",
+    description="힙 정렬 및 도수 정렬 상태 스냅샷 데이터 제공 API (Stitch projects/14863255674366848797 연동)",
+    version="1.0.0",
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+START_TIME = time.time()
+
+
+class SortRequest(BaseModel):
+    array: Optional[List[int]] = Field(
+        default=None,
+        description="정렬할 정수형 배열 (미지정 시 무작위 32개 원소 자동 생성)",
+        examples=[[49, 12, 38, 25, 42, 18, 33, 48, 5, 29, 44, 15, 39, 21, 50, 8]],
+    )
+
+    @field_validator("array")
+    @classmethod
+    def validate_array(cls, v: Optional[List[int]]) -> Optional[List[int]]:
+        if v is not None:
+            if len(v) < 3:
+                raise ValueError("배열의 길이는 최소 3개 이상이어야 시각화 비교가 가능합니다.")
+            if len(v) > 128:
+                raise ValueError("시각화 성능을 위해 최대 128개 이하의 배열만 지원합니다.")
+            if any(x < 0 for x in v):
+                raise ValueError("도수 정렬(Counting Sort) 인덱싱을 위해 0 이상의 정수만 지원합니다.")
+        return v
+
+
+def generate_default_array(size: int = 32, max_val: int = 50) -> List[int]:
+    return [random.randint(1, max_val) for _ in range(size)]
+
+
+@app.get("/api/health", summary="헬스 체크")
 def health_check():
-    """서버 동작 상태 확인용 헬스체크 엔드포인트"""
-    return jsonify({
-        "status": "online",
-        "message": "Google Cloud Run Linear Search Server is running."
-    }), 200
-
-@app.route('/search', methods=['POST'])
-def linear_search():
-    """
-    선형검색 알고리즘을 수행하고, 각 단계별 비교 상태와 결과를 반환하는 엔드포인트
-    
-    [Request Body]
-    {
-        "array": [10, 20, 30, 40, 50],
-        "target": 30
+    return {
+        "status": "healthy",
+        "service": "heep-sort-visualizer",
+        "uptime_seconds": round(time.time() - START_TIME, 2),
+        "stitch_project": METADATA["project"],
     }
-    """
-    try:
-        data = request.get_json()
-        
-        # 입력 값 유효성 검사
-        if not data or 'array' not in data or 'target' not in data:
-            return jsonify({
-                "error": "잘못된 요청 형식입니다. 'array'와 'target' 필드가 필요합니다."
-            }), 400
-            
-        array = data['array']
-        target = data['target']
-        
-        # 선형검색 실행 및 단계별 로깅
-        steps = []
-        found_index = -1
-        
-        for index, value in enumerate(array):
-            is_match = (value == target)
-            steps.append({
-                "step": index + 1,
-                "index": index,
-                "current_value": value,
-                "target": target,
-                "is_match": is_match,
-                "description": f"인덱스 {index}의 값 {value}와(과) 타겟 {target} 비교 -> {'일치' if is_match else '불일치'}"
-            })
-            
-            if is_match:
-                found_index = index
-                break  # 타겟을 찾으면 검색 종료
-                
-        # 최종 응답 구조 생성 (복잡도 분석 포함)
-        response = {
-            "status": "success",
-            "input_array": array,
-            "target": target,
-            "found_index": found_index,
-            "is_found": found_index != -1,
-            "total_steps": len(steps),
-            "steps": steps,
-            "complexity": {
-                "time_complexity": {
-                    "best": "O(1) - 첫 번째 요소에서 탐색 성공",
-                    "average": "O(N) - 평균적으로 N/2회 비교",
-                    "worst": "O(N) - 배열 전체 탐색 또는 타겟 없음"
-                },
-                "space_complexity": "O(1) - 보조 메모리 사용 없음 (단계 로깅 제외 기준)"
-            }
+
+
+@app.post("/api/sort", summary="힙 정렬 및 도수 정렬 시뮬레이션 스냅샷 생성")
+def generate_sort_snapshots(request_data: SortRequest):
+    arr = request_data.array if request_data.array else generate_default_array(32, 50)
+
+    start_heap = time.perf_counter()
+    heap_result = heap_sort_recorder(arr)
+    heap_duration_ms = round((time.perf_counter() - start_heap) * 1000, 3)
+
+    start_counting = time.perf_counter()
+    counting_result = counting_sort_recorder(arr)
+    counting_duration_ms = round((time.perf_counter() - start_counting) * 1000, 3)
+
+    heap_result["execution_time_ms"] = heap_duration_ms
+    counting_result["execution_time_ms"] = counting_duration_ms
+
+    return {
+        "success": True,
+        "stitch_project": METADATA["project"],
+        "array_size": len(arr),
+        "original_array": arr,
+        "results": {
+            "heap_sort": heap_result,
+            "counting_sort": counting_result,
+        },
+        "comparison_metrics": {
+            "speedup_ratio": round(heap_duration_ms / max(counting_duration_ms, 0.001), 2),
+            "heap_ops": heap_result["comparisons"] + heap_result["swaps"],
+            "counting_ops": counting_result["total_steps"],
         }
-        
-        return jsonify(response), 200
+    }
 
-    except Exception as e:
-        return jsonify({"status": "error", "message": str(e)}), 500
 
-if __name__ == '__main__':
-    # Cloud Run은 PORT 환경변수를 제공하므로 이를 수신하도록 설정합니다.
-    import os
-    port = int(os.environ.get('PORT', 8080))
-    app.run(host='0.0.0.0', port=port)
+@app.get("/api/demo", summary="내장 데모 배열 및 메타데이터 반환")
+def get_demo_data():
+    sample_arr = [49, 12, 38, 25, 42, 18, 33, 48, 5, 29, 44, 15, 39, 21, 50, 8, 31, 14, 46, 23, 37, 10, 27, 41, 16, 35, 20, 45, 9, 30, 43, 17]
+    return {
+        "success": True,
+        "stitch_project": METADATA["project"],
+        "sample_array": sample_arr
+    }
+
+
+if __name__ == "__main__":
+    import uvicorn
+    port = int(os.environ.get("PORT", 8080))
+    uvicorn.run("main:app", host="0.0.0.0", port=port, reload=True)
+
+
